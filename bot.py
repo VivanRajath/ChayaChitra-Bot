@@ -1,42 +1,44 @@
-
 import os
 import logging
 import asyncio
 from flask import Flask, request
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
-    ContextTypes,
     CommandHandler,
     MessageHandler,
+    ContextTypes,
+    filters,
     AIORateLimiter,
     Application,
-    filters
 )
 from diffusers import StableDiffusionPipeline
 import torch
 from io import BytesIO
+import threading
 
 # === Environment Variables ===
-BOT_TOKEN = '7849179622:AAEnCXeNnJikeFJiirg8vZXLF6AOIf3oU-U'
-HF_TOKEN = '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'
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN", "YOUR_HUGGINGFACE_TOKEN")
 
 # === Logging ===
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # === Setup Device ===
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"📌 Using device: {device}")
 
 # === Load Stable Diffusion Model ===
-pipe = StableDiffusionPipeline.from_pretrained(
-    "CompVis/stable-diffusion-v1-4",
-    revision="fp16",
-    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    use_auth_token=HF_TOKEN
-).to(device)
+try:
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "CompVis/stable-diffusion-v1-4",
+        revision="fp16" if device == "cuda" else "main",
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        use_auth_token=HF_TOKEN,
+    ).to(device)
+except Exception as e:
+    print(f"❌ Failed to load model: {e}")
+    exit(1)
 
 # === Flask App ===
 flask_app = Flask(__name__)
@@ -44,30 +46,28 @@ flask_app = Flask(__name__)
 # === Telegram Bot Application ===
 application: Application = ApplicationBuilder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
 
-# === Handlers ===
+# === Bot Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    username = f"@{user.username}" if user.username else "no username"
-    await update.message.reply_text(f"👋 Hi {user.first_name}! Send me a prompt and I’ll generate an image for you.")
-    print(f"🚀 Bot started by {user.first_name} ({username})")
+    await update.message.reply_text("👋 Hi! Send me a prompt and I’ll generate an image for you.")
+    print(f"🚀 Bot started by {update.effective_user.first_name}")
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = update.message.text
-    user = update.effective_user
-    username = f"@{user.username}" if user.username else "no username"
-    print(f"📝 Prompt received from {user.first_name} ({username}): {prompt}")
-
+    print(f"📝 Prompt received: {prompt}")
     await update.message.reply_text("⏳ Generating image... please wait!")
-    image = pipe(prompt).images[0]
 
-    bio = BytesIO()
-    bio.name = "image.png"
-    image.save(bio, "PNG")
-    bio.seek(0)
+    try:
+        image = pipe(prompt).images[0]
+        bio = BytesIO()
+        bio.name = "image.png"
+        image.save(bio, "PNG")
+        bio.seek(0)
+        await update.message.reply_photo(photo=bio, caption=f"🖼️ Prompt: {prompt}\n✅ Here's your image!")
+    except Exception as e:
+        print(f"❌ Error generating image: {e}")
+        await update.message.reply_text("⚠️ Sorry, something went wrong while generating the image.")
 
-    await update.message.reply_photo(photo=bio, caption=f"🖼️ Prompt: {prompt}\n✅ Here's your image!")
-
-# Register handlers
+# === Register Bot Handlers ===
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_image))
 
@@ -83,18 +83,19 @@ def index():
     return "🤖 Bot is running!"
 
 # === Main Entrypoint ===
+def start_flask():
+    port = int(os.environ.get("PORT", 5000))
+    flask_app.run(host="0.0.0.0", port=port)
+
 if __name__ == "__main__":
-    import threading
+    # Start Flask server in a separate thread
+    threading.Thread(target=start_flask).start()
 
-    # Start Flask app in a separate thread
-    def run_flask():
-        port = int(os.environ.get("PORT", 5000))
-        flask_app.run(host="0.0.0.0", port=port)
+    async def start_bot():
+        await application.initialize()
+        await application.start()
+        print("✅ Telegram bot started.")
+        await application.updater.start_polling()
+        await application.wait_until_shutdown()
 
-    threading.Thread(target=run_flask).start()
-
-    # Run the Telegram bot (polling fallback, can be removed if webhook-only)
-    asyncio.run(application.initialize())
-    asyncio.run(application.start())
-    print("✅ Bot is running...")
-    asyncio.get_event_loop().run_forever()
+    asyncio.run(start_bot())
