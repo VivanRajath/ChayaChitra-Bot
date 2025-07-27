@@ -2,11 +2,14 @@ services:
   - type: web
     name: telegram-image-gen-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: python bot.py
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN
-        sync: false   # Set in Render UI manually
+        sync: false
       - key: HF_TOKEN
-        sync: false   # Set in Render UI manually
+        sync: false
+    runtime: python3.12
