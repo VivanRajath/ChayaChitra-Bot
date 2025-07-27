@@ -78,7 +78,7 @@ if __name__ == "__main__":
         await application.initialize()
         await application.start()
         print("✅ Telegram bot started.")
-        await application.updater.start_polling()
-        await application.wait_until_shutdown()
+        await application.run_polling()  # ✅ CORRECT WAY
+        await application.shutdown()
 
     asyncio.run(start_bot())
