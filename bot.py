@@ -9,47 +9,34 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    AIORateLimiter,
     Application,
 )
-from diffusers import StableDiffusionPipeline
-import torch
-from io import BytesIO
+from huggingface_hub import InferenceClient
+from PIL import Image
+import io
 import threading
 
-# === Environment Variables ===
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-HF_TOKEN = os.environ.get("HF_TOKEN", "YOUR_HUGGINGFACE_TOKEN")
+
+
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # === Logging ===
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# === Setup Device ===
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"📌 Using device: {device}")
-
-# === Load Stable Diffusion Model ===
-try:
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-4",
-        revision="fp16" if device == "cuda" else "main",
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        use_auth_token=HF_TOKEN,
-    ).to(device)
-except Exception as e:
-    print(f"❌ Failed to load model: {e}")
-    exit(1)
+# === Hugging Face Inference Client ===
+client = InferenceClient(model="runwayml/stable-diffusion-v1-5", token=HF_TOKEN)
 
 # === Flask App ===
 flask_app = Flask(__name__)
 
 # === Telegram Bot Application ===
-application: Application = ApplicationBuilder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
+application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # === Bot Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! Send me a prompt and I’ll generate an image for you.")
-    print(f"🚀 Bot started by {update.effective_user.first_name}")
+    await update.message.reply_text("👋 Hi! Send me a prompt and I’ll generate an image using Stable Diffusion!")
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = update.message.text
@@ -57,38 +44,34 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Generating image... please wait!")
 
     try:
-        image = pipe(prompt).images[0]
-        bio = BytesIO()
+        response = client.text_to_image(prompt)
+        image = Image.open(io.BytesIO(response))
+
+        bio = io.BytesIO()
         bio.name = "image.png"
         image.save(bio, "PNG")
         bio.seek(0)
+
         await update.message.reply_photo(photo=bio, caption=f"🖼️ Prompt: {prompt}\n✅ Here's your image!")
     except Exception as e:
         print(f"❌ Error generating image: {e}")
         await update.message.reply_text("⚠️ Sorry, something went wrong while generating the image.")
 
-# === Register Bot Handlers ===
+# === Register Handlers ===
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_image))
 
-# === Flask Webhook Endpoint ===
-@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return "ok"
-
+# === Flask Web Server ===
 @flask_app.route("/", methods=["GET"])
 def index():
-    return "🤖 Bot is running!"
+    return "🤖 Bot is live!"
 
-# === Main Entrypoint ===
 def start_flask():
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
 
+# === Main Entrypoint ===
 if __name__ == "__main__":
-    # Start Flask server in a separate thread
     threading.Thread(target=start_flask).start()
 
     async def start_bot():
