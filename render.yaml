@@ -1,15 +1,12 @@
 services:
-  - type: web
-    name: telegram-image-gen-bot
-    env: python
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
+  - type: worker
+    name: stable-diffusion-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    autoDeploy: true
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: HF_TOKEN
         sync: false
-    runtime: python3.12
+    region: oregon

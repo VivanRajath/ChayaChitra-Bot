@@ -1,127 +1,76 @@
 import os
 import logging
-import asyncio
-import nest_asyncio
-nest_asyncio.apply()
-
-from flask import Flask
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-    Application,
-)
-from huggingface_hub import InferenceClient
+import torch
+from io import BytesIO
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from diffusers import StableDiffusionPipeline
 from PIL import Image
-import io
-import threading
-import sys
 
-# === Version Check ===
-if sys.version_info >= (3, 13):
-    print("⚠️ Python 3.13+ may have compatibility issues. Use Python 3.11 or 3.12.")
+# Read tokens from environment variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# === Tokens from Environment ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN")
+if not BOT_TOKEN or not HF_TOKEN:
+    raise EnvironmentError("Please set BOT_TOKEN and HF_TOKEN as environment variables.")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing. Set it in Render's environment variables.")
-if not HF_TOKEN:
-    raise ValueError("HF_TOKEN is missing. Set it in Render's environment variables.")
-
-# === Logging ===
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Hugging Face Client ===
-client = InferenceClient(model="runwayml/stable-diffusion-v1-5", token=HF_TOKEN)
+# Detect device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"📌 Using device: {device}")
 
-# === Flask App ===
-flask_app = Flask(__name__)
+# Load model
+pipe = StableDiffusionPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4",
+    revision="fp16" if device == "cuda" else None,
+    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    use_auth_token=HF_TOKEN
+).to(device)
 
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "🤖 Telegram Image Generator Bot is live on Render!"
-
-@flask_app.route("/health", methods=["GET"])
-def health():
-    return {"status": "healthy", "bot": "running"}
-
-def start_flask():
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🌐 Starting Flask server on port {port}")
-    flask_app.run(host="0.0.0.0", port=port, debug=False)
-
-# === Telegram Handlers ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Hi! Send me a text prompt and I'll generate an image using Stable Diffusion!"
+# /start command
+def start(update, context):
+    user = update.message.from_user
+    update.message.reply_text(
+        f"👋 Hi {user.first_name}! Send me a prompt and I’ll generate an image for you."
     )
+    logger.info(f"🚀 Started by {user.first_name} (@{user.username or 'no username'})")
 
-async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Prompt handler
+def generate_image(update, context):
     prompt = update.message.text.strip()
-    if not prompt:
-        await update.message.reply_text("❗ Please provide a text prompt.")
-        return
+    user = update.message.from_user
+    logger.info(f"📝 Prompt from {user.first_name}: {prompt}")
 
-    logger.info(f"📝 Prompt received: {prompt}")
-    status_msg = await update.message.reply_text("⏳ Generating image...")
+    update.message.reply_text("⏳ Generating image... please wait!")
 
     try:
-        response = client.text_to_image(prompt)
-        image = Image.open(io.BytesIO(response))
+        image = pipe(prompt).images[0]
 
-        bio = io.BytesIO()
+        # Save using Pillow
+        bio = BytesIO()
         bio.name = "image.png"
-        image.save(bio, "PNG")
+        image.save(bio, format="PNG")
         bio.seek(0)
 
-        await status_msg.delete()
-        await update.message.reply_photo(photo=bio, caption=f"🖼️ Prompt: \"{prompt}\"")
-        logger.info("✅ Image sent successfully")
+        update.message.reply_photo(photo=bio, caption=f"🖼️ Prompt: {prompt}\n✅ Done!")
+        logger.info("✅ Image sent.")
     except Exception as e:
-        logger.error(f"❌ Generation failed: {e}")
-        await status_msg.edit_text("⚠️ Failed to generate image. Try again later.")
+        logger.error(f"❌ Error: {e}")
+        update.message.reply_text("⚠️ Something went wrong while generating the image.")
 
-# === Telegram Application ===
-application: Application = None
+# Main function
+def main():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-def create_application():
-    global application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_image))
-    logger.info("✅ Telegram bot initialized")
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, generate_image))
 
-async def start_bot():
-    global application
-    if application is None:
-        create_application()
+    logger.info("✅ Bot is running...")
+    updater.start_polling()
+    updater.idle()
 
-    await application.initialize()
-    await application.start()
-    logger.info("🤖 Telegram bot started")
-    await application.run_polling()
-
-# === Entrypoint ===
 if __name__ == "__main__":
-    try:
-        flask_thread = threading.Thread(target=start_flask, daemon=True)
-        flask_thread.start()
-
-        loop = asyncio.get_event_loop()
-        loop.create_task(start_bot())
-        loop.run_forever()
-
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
-        sys.exit(1)
+    main()
